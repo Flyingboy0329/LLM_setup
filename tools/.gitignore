@@ -1,0 +1,13 @@
+# 排除模型大檔案 (嚴禁推上 GitHub)
+*.gguf
+Models/*
+
+# 排除二進位推論檔 (讓使用者照 SOP 自己放或走 Releases)
+*.exe
+*.dll
+
+# 排除個人敏感設定與日誌
+config/settings.json
+logs/*.log
+__pycache__/
+.venv/

@@ -1,12 +1,10 @@
-# 模型資產排除 (不進 Git)
+嚜甍_pycache__/
+*.py[cod]
+build/
+dist/
+*.spec
+*.exe
+*.dll
 Models/*.gguf
-Models/*
-
-# 執行日誌與暫存
-logs/*.log
-__pycache__/
-*.pyc
-
-# 敏感金鑰防呆
 config/settings.json
-.env
+.vscode/

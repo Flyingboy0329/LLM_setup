@@ -6,6 +6,7 @@ import subprocess
 import ctypes
 import json
 import psutil
+import urllib.request
 import webbrowser
 from pathlib import Path
 from datetime import datetime
@@ -13,10 +14,9 @@ from datetime import datetime
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QTextEdit, QProgressBar,
-    QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, 
-    QFrame, QFileDialog
+    QFrame, QFileDialog, QComboBox, QCheckBox
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRectF, QPointF
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QRectF, QPointF, QTimer
 from PyQt6.QtGui import (
     QFont, QPainter, QColor, QPen, QBrush, QConicalGradient, 
     QLinearGradient, QIcon, QPixmap, QPolygonF, QTextCursor
@@ -101,7 +101,6 @@ def enable_windows_dark_titlebar(hwnd):
     except Exception:
         pass
 
-# ===== 1. 圓形進度環 =====
 class RingMeter(QWidget):
     def __init__(self, title="CPU", unit="%", start_color="#00F5D4", end_color="#7928CA", size=115):
         super().__init__()
@@ -155,7 +154,6 @@ class RingMeter(QWidget):
         painter.drawText(QRectF(0, h * 0.60, w, 16), Qt.AlignmentFlag.AlignCenter, self.value_text)
         painter.end()
 
-# ===== 2. 方形水缸蓄水池 =====
 class RamTankMeter(QWidget):
     def __init__(self, title="RAM TANK", width=130, height=115):
         super().__init__()
@@ -211,7 +209,6 @@ class RamTankMeter(QWidget):
         painter.drawText(QRectF(6, 70, w - 12, 16), Qt.AlignmentFlag.AlignCenter, self.val_str)
         painter.end()
 
-# ===== 3. 水銀溫度計 =====
 class ThermoMeter(QWidget):
     def __init__(self, width=34, height=115):
         super().__init__()
@@ -264,7 +261,6 @@ class ThermoMeter(QWidget):
         painter.drawText(QRectF(0, h - 10, w, 11), Qt.AlignmentFlag.AlignCenter, f"{int(self.temp_val)}°C")
         painter.end()
 
-# ===== 4. 磁碟小卡片 =====
 class DiskTile(QFrame):
     def __init__(self, drive_letter="C:"):
         super().__init__()
@@ -476,14 +472,15 @@ class TelemetryThread(QThread):
 
 class LlamaServerThread(QThread):
     log_signal = pyqtSignal(str)
-    started_signal = pyqtSignal(int)
+    ready_signal = pyqtSignal(int)
     stopped_signal = pyqtSignal()
 
-    def __init__(self, model_path: Path, ctx_size: int, port: int):
+    def __init__(self, model_path: Path, ctx_size: int, port: int, enable_reasoning: bool = False):
         super().__init__()
         self.model_path = model_path
         self.ctx_size = ctx_size
         self.port = port
+        self.enable_reasoning = enable_reasoning
         self.process = None
 
     def run(self):
@@ -497,13 +494,19 @@ class LlamaServerThread(QThread):
             "-c", str(self.ctx_size),
             "-ngl", str(plan["ngl"]),
             "--port", str(self.port),
-            "--host", "0.0.0.0",
-            "-fa"
+            "--host", "127.0.0.1",
+            "-fa", "on",
+            "--cache-type-k", "q8_0",
+            "--cache-type-v", "q8_0"
         ]
-        if plan["tensor_split"]:
-            cmd.extend(["-ts", plan["tensor_split"]])
 
-        self.log_signal.emit(f"🚀 [執行指令] {' '.join(cmd)}")
+        # 若未勾選深度思考，則傳遞參數關閉思考耗時以加速
+        if not self.enable_reasoning:
+            cmd.append("--no-reasoning-preserve")
+
+        if plan["tensor_split"]:
+            ts_str = str(plan["tensor_split"]).replace(":", ",")
+            cmd.extend(["-ts", ts_str])
         try:
             self.process = subprocess.Popen(
                 cmd,
@@ -518,11 +521,30 @@ class LlamaServerThread(QThread):
                 try:
                     p = psutil.Process(self.process.pid)
                     p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
-                    self.log_signal.emit("🛡️ [IE 防呆] 引擎優先級已調降為背景等級，保障遊戲 FPS。")
+                    self.log_signal.emit("🛡️ [IE 防呆] 引擎優先級已調降為背景等級，保障前台 FPS。")
                 except Exception:
                     pass
 
-            self.started_signal.emit(self.port)
+            # 啟動非同步健康檢查線程：等伺服器真正回應 HTTP 200 才開網頁
+            checker = threading_checker = threading = None
+            import threading
+            def poll_health():
+                url = f"http://127.0.0.1:{self.port}/health"
+                for _ in range(60):
+                    time.sleep(1.0)
+                    if self.process.poll() is not None:
+                        break
+                    try:
+                        req = urllib.request.Request(url)
+                        with urllib.request.urlopen(req, timeout=1.0) as resp:
+                            if resp.status == 200:
+                                self.ready_signal.emit(self.port)
+                                break
+                    except Exception:
+                        pass
+
+            th = threading.Thread(target=poll_health, daemon=True)
+            th.start()
 
             for line in iter(self.process.stdout.readline, ''):
                 if line:
@@ -614,13 +636,10 @@ class MidnightDashboardWindow(QMainWindow):
         upper_box = QHBoxLayout()
         upper_box.setSpacing(16)
 
-        # ==========================================================
         # 1. 左欄：硬體核心監控
-        # ==========================================================
         col_left = QVBoxLayout()
         col_left.setSpacing(14)
 
-        # 1-1. SYSTEM CORE & MEMORY
         card_ram = self.make_card()
         ram_l = QVBoxLayout(card_ram)
         ram_l.setContentsMargins(18, 14, 18, 16)
@@ -648,7 +667,6 @@ class MidnightDashboardWindow(QMainWindow):
         ram_l.addLayout(core_box)
         col_left.addWidget(card_ram)
 
-        # 1-2. LOCAL STORAGE POOL
         card_disk = self.make_card()
         disk_l = QVBoxLayout(card_disk)
         disk_l.setContentsMargins(18, 12, 18, 12)
@@ -679,7 +697,6 @@ class MidnightDashboardWindow(QMainWindow):
         disk_l.addLayout(more_row)
         col_left.addWidget(card_disk)
 
-        # 1-3. GPU ACCELERATION
         card_gpus = self.make_card()
         gpu_l = QVBoxLayout(card_gpus)
         gpu_l.setContentsMargins(18, 14, 18, 16)
@@ -713,16 +730,13 @@ class MidnightDashboardWindow(QMainWindow):
 
         upper_box.addLayout(col_left, stretch=3)
 
-        # ==========================================================
-        # 2. 中欄：顯存耗損計算與算式說明 (獨立 Log 風格) + 底部連線中樞
-        # ==========================================================
+        # 2. 中欄：顯存耗損計算 + 賽博龐克安全憑證中樞
         col_mid = QVBoxLayout()
         card_hub = self.make_card()
         hub_l = QVBoxLayout(card_hub)
         hub_l.setContentsMargins(20, 16, 20, 16)
         hub_l.setSpacing(10)
 
-        # 頂部標題
         head_calc = QHBoxLayout()
         lbl_hub_title = QLabel("VRAM CONSUMPTION ANALYZER")
         lbl_hub_title.setStyleSheet("color: #E2E8F0; font-size: 13px; font-weight: bold; letter-spacing: 0.5px;")
@@ -741,24 +755,30 @@ class MidnightDashboardWindow(QMainWindow):
         tbc_l.addWidget(lbl_c_sub)
         hub_l.addWidget(title_box_c)
 
-        # 2-1. 耗損計算 Log 獨立終端視窗
         self.txt_calc_log = QTextEdit()
         self.txt_calc_log.setObjectName("CalcLog")
         self.txt_calc_log.setReadOnly(True)
         hub_l.addWidget(self.txt_calc_log, stretch=1)
 
-        # 2-2. 連線與安全性中樞 (放置於中間最下方)
+        # 賽博龐克安全憑證與穿透工具列
         net_box = QFrame()
-        net_box.setStyleSheet("background-color: #090A12; border: 1px solid #232742; border-radius: 10px; padding: 10px;")
+        net_box.setStyleSheet("""
+            QFrame {
+                background-color: #090A12;
+                border: 1px solid #1E2338;
+                border-radius: 10px;
+                padding: 10px;
+            }
+        """)
         nb_l = QVBoxLayout(net_box)
         nb_l.setSpacing(8)
 
-        nb_title = QLabel("🔑 網路穿透與憑證配置 (修改後即時自動保存)")
-        nb_title.setStyleSheet("color: #E2E8F0; font-size: 11px; font-weight: bold;")
+        nb_title = QLabel("⚡ 網路穿透與安全憑證配置 (即時自動保存)")
+        nb_title.setStyleSheet("color: #00F5D4; font-size: 11px; font-weight: bold; letter-spacing: 0.5px;")
         nb_l.addWidget(nb_title)
 
         row_net = QHBoxLayout()
-        self.btn_open_local = QPushButton("🌐 開啟 Localhost")
+        self.btn_open_local = QPushButton("🌐 Localhost :8080")
         self.btn_open_local.setObjectName("LinkBtn")
         self.btn_open_local.clicked.connect(self.open_current_localhost)
         
@@ -772,25 +792,49 @@ class MidnightDashboardWindow(QMainWindow):
         nb_l.addLayout(row_net)
 
         row_key = QHBoxLayout()
-        lbl_k = QLabel("管理員金鑰:")
-        lbl_k.setStyleSheet("color: #717B9E; font-size: 11px;")
+        lbl_k = QLabel("🔑 管理員金鑰:")
+        lbl_k.setStyleSheet("color: #A0ABC0; font-size: 11px; font-weight: bold;")
+        
         self.edit_key = QLineEdit()
         self.edit_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.edit_key.setPlaceholderText("本地 Admin Key (保護硬碟讀寫與工具權限)...")
         self.edit_key.setText(self.cfg.get("admin_secret_key", ""))
         self.edit_key.textChanged.connect(self.on_key_changed)
+        self.edit_key.setStyleSheet("""
+            QLineEdit {
+                background: #0D0F1A;
+                border: 1px solid #232742;
+                border-radius: 6px;
+                color: #FF007F;
+                font-family: Consolas, monospace;
+                font-weight: bold;
+                padding: 5px 8px;
+            }
+            QLineEdit:focus { border: 1px solid #FF007F; }
+        """)
+
+        self.btn_toggle_eye = QPushButton("👁️ 顯示")
+        self.btn_toggle_eye.setObjectName("SubPillBtn")
+        self.btn_toggle_eye.setFixedWidth(70)
+        self.btn_toggle_eye.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_toggle_eye.clicked.connect(self.toggle_key_visibility)
+
+        self.btn_copy_key = QPushButton("📋 複製")
+        self.btn_copy_key.setObjectName("SubPillBtn")
+        self.btn_copy_key.setFixedWidth(65)
+        self.btn_copy_key.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_copy_key.clicked.connect(self.copy_key_to_clipboard)
+
         row_key.addWidget(lbl_k)
-        row_key.addWidget(self.edit_key)
+        row_key.addWidget(self.edit_key, stretch=1)
+        row_key.addWidget(self.btn_toggle_eye)
+        row_key.addWidget(self.btn_copy_key)
         nb_l.addLayout(row_key)
 
         hub_l.addWidget(net_box)
-
         col_mid.addWidget(card_hub)
         upper_box.addLayout(col_mid, stretch=4)
 
-        # ==========================================================
         # 3. 右欄：即時日誌終端
-        # ==========================================================
         col_right = QVBoxLayout()
         card_log = self.make_card()
         cl_l = QVBoxLayout(card_log)
@@ -824,9 +868,7 @@ class MidnightDashboardWindow(QMainWindow):
         upper_box.addLayout(col_right, stretch=3)
         body_layout.addLayout(upper_box, stretch=1)
 
-        # ==========================================================
-        # 4. 下方管線條：自選目錄 + 模型下拉 + Context 修改 + 啟動按鈕
-        # ==========================================================
+        # 4. 下方管線條
         card_watch = self.make_card()
         cw_l = QHBoxLayout(card_watch)
         cw_l.setContentsMargins(20, 10, 20, 10)
@@ -850,6 +892,11 @@ class MidnightDashboardWindow(QMainWindow):
         btn_choose_dir.clicked.connect(self.choose_models_folder)
         cw_l.addWidget(btn_choose_dir)
 
+        self.chk_reasoning = QCheckBox("🧠 深度思考")
+        self.chk_reasoning.setChecked(False)
+        self.chk_reasoning.setStyleSheet("QCheckBox { color: #00F5D4; font-weight: bold; font-size: 11px; }")
+        cw_l.addWidget(self.chk_reasoning)
+
         lbl_ctx_tag = QLabel("Context (總Token):")
         lbl_ctx_tag.setStyleSheet("color: #A0AEC0; font-weight: bold; font-size: 11px;")
         cw_l.addWidget(lbl_ctx_tag)
@@ -872,7 +919,7 @@ class MidnightDashboardWindow(QMainWindow):
         body_layout.addWidget(card_watch)
         main_layout.addWidget(body, stretch=1)
 
-        # 底部署名
+        # 底部署名（純個人工程版）
         footer = QFrame()
         footer.setStyleSheet("background-color: #090A12; border-top: 1px solid #161828; padding: 6px;")
         f_layout = QHBoxLayout(footer)
@@ -880,7 +927,7 @@ class MidnightDashboardWindow(QMainWindow):
 
         foot_left = QLabel("LLM_SETUP STUDIO  |  NEURAL INGESTION & AUTO-DEPLOY")
         foot_left.setStyleSheet("color: #555E7A; font-size: 10px; font-weight: bold; letter-spacing: 0.8px;")
-        foot_right = QLabel("Developed by Pan Bo-Han (潘柏翰)  |  指導老師：郭俞霈教授")
+        foot_right = QLabel("Developed by Pan Bo-Han (潘柏翰)")
         foot_right.setStyleSheet("color: #8C9BAE; font-size: 11px; font-weight: bold;")
         f_layout.addWidget(foot_left)
         f_layout.addStretch()
@@ -889,14 +936,27 @@ class MidnightDashboardWindow(QMainWindow):
 
         self.append_log("⚡ [系統核心] 完全體工作站已就緒。")
 
+    def toggle_key_visibility(self):
+        if self.edit_key.echoMode() == QLineEdit.EchoMode.Password:
+            self.edit_key.setEchoMode(QLineEdit.EchoMode.Normal)
+            self.btn_toggle_eye.setText("🕶️ 隱藏")
+        else:
+            self.edit_key.setEchoMode(QLineEdit.EchoMode.Password)
+            self.btn_toggle_eye.setText("👁️ 顯示")
+
+    def copy_key_to_clipboard(self):
+        QApplication.clipboard().setText(self.edit_key.text())
+        self.btn_copy_key.setText("✅ 已複製")
+        QTimer.singleShot(1500, lambda: self.btn_copy_key.setText("📋 複製"))
+
     def append_log(self, text):
         ts = datetime.now().strftime("%H:%M:%S")
         clean = text.strip()
-        if "🚀" in clean or "啟動" in clean or "成功" in clean:
+        if "🚀" in clean or "啟動" in clean or "成功" in clean or "🎉" in clean:
             styled = f"<span style='color:#00F5D4; font-weight:bold;'>{clean}</span>"
         elif "❌" in clean or "異常" in clean or "失敗" in clean:
             styled = f"<span style='color:#FF007F; font-weight:bold;'>{clean}</span>"
-        elif "🛡️" in clean or "推薦" in clean or "🔌" in clean:
+        elif "🛡️️" in clean or "推薦" in clean or "🔌" in clean:
             styled = f"<span style='color:#FBBF24; font-weight:bold;'>{clean}</span>"
         else:
             styled = f"<span style='color:#A0AEC0;'>{clean}</span>"
@@ -942,7 +1002,6 @@ class MidnightDashboardWindow(QMainWindow):
             self.recalculate_vram_audit()
 
     def recalculate_vram_audit(self):
-        """核心演算法：即時動態計算顯存耗損與推論算式"""
         model_path = self.combo_models.currentData()
         if not isinstance(model_path, Path) or not model_path.exists():
             return
@@ -954,7 +1013,6 @@ class MidnightDashboardWindow(QMainWindow):
         ctx_val = self.edit_ctx.text().strip()
         ctx_size = int(ctx_val) if ctx_val.isdigit() and int(ctx_val) > 0 else 8192
 
-        # 1. 量化條件解析
         fname_upper = model_path.name.upper()
         if "Q4_K_M" in fname_upper or "Q4_0" in fname_upper:
             quant_type = "Q4_K_M (4-bit Balanced)"
@@ -972,14 +1030,11 @@ class MidnightDashboardWindow(QMainWindow):
             quant_type = "標準 GGUF 量化"
             bpw = 4.5
 
-        # 2. KV Cache 顯存算式：KV_Cache_GB = (2 * Layers * Heads * Dim * BytesPerVal * Context) / 1024^3
-        # 依主流 32B / 14B 規格平均換算：每 1024 Token 的 FP16 KV Cache 約為 0.12 GB ~ 0.20 GB
         kv_cache_gb = round((ctx_size / 1024) * 0.14, 2)
-        cuda_overhead = 1.15  # CUDA Context 驅動基本底噪
+        cuda_overhead = 1.15
         total_estimate_gb = round(sz_gb + kv_cache_gb + cuda_overhead, 2)
         remaining_vram = round(tot_vram - total_estimate_gb, 2)
 
-        # 3. 遊戲與安全防呆判定
         if remaining_vram >= 3.0:
             safety_badge = "<span style='color:#00F5D4; font-weight:bold;'>【極度充裕 • 綠燈】</span> 保留顯存 ≥ 3GB，Riot 遊戲 (LoL/特戰) 100% 幀率保障，無卡頓風險。"
         elif remaining_vram >= 0.8:
@@ -987,7 +1042,6 @@ class MidnightDashboardWindow(QMainWindow):
         else:
             safety_badge = "<span style='color:#FF758F; font-weight:bold;'>【超載危險 • 紅燈】</span> 預估顯存溢出！極易引發 CUDA OOM 閃退，強烈建議調小 Context！"
 
-        # 渲染算式與日誌
         html_content = f"""
         <div style='font-family: Consolas, monospace; line-height: 145%;'>
             <span style='color:#C084FC; font-weight:bold;'>[工額分析] 模型規格與量化條件</span><br>
@@ -1067,23 +1121,24 @@ class MidnightDashboardWindow(QMainWindow):
             self.btn_open_local.setText(f"🌐 Localhost :{self.active_port}")
             self.append_log(f"🔌 鎖定可用連接埠: {self.active_port} | Context 視窗: {ctx_size}")
 
-            self.server_thread = LlamaServerThread(model_path, ctx_size, self.active_port)
+            self.server_thread = LlamaServerThread(model_path, ctx_size, self.active_port, enable_reasoning=self.chk_reasoning.isChecked())
             self.server_thread.log_signal.connect(self.append_log)
-            self.server_thread.started_signal.connect(self.on_server_started)
+            self.server_thread.ready_signal.connect(self.on_server_ready)
             self.server_thread.stopped_signal.connect(self.on_server_stopped)
             self.server_thread.start()
 
             self.btn_toggle.setText("⏹ 關閉模型")
             self.btn_toggle.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #E11D48, stop:1 #BE123C); color: #FFF; border: none; border-radius: 10px; padding: 9px 24px; font-weight: bold; font-size: 12px;")
-            self.badge_llama.setText("LLAMA: RUNNING")
-            self.badge_llama.setStyleSheet("background-color: #122822; color: #52B788; border: 1px solid #2D6A4F; border-radius: 10px; padding: 4px 12px; font-size: 10px; font-weight: bold;")
+            self.badge_llama.setText("LLAMA: LOADING...")
+            self.badge_llama.setStyleSheet("background-color: #2D2310; color: #FBBF24; border: 1px solid #D97706; border-radius: 10px; padding: 4px 12px; font-size: 10px; font-weight: bold;")
         else:
             self.append_log("🛑 正在關閉推論後端進程...")
             self.server_thread.stop()
 
-    def on_server_started(self, port):
-        self.badge_llama.setText(f"LLAMA: PORT {port}")
-        self.append_log(f"🎉 本地推論核心已就緒！正在拉起 llama 原生對話網頁...")
+    def on_server_ready(self, port):
+        self.badge_llama.setText(f"LLAMA: RUNNING (:{port})")
+        self.badge_llama.setStyleSheet("background-color: #122822; color: #52B788; border: 1px solid #2D6A4F; border-radius: 10px; padding: 4px 12px; font-size: 10px; font-weight: bold;")
+        self.append_log(f"🎉 [健康檢測] 推論核心已通過 HTTP 200 校驗！正在拉起原生對話頁面...")
         webbrowser.open(f"http://127.0.0.1:{port}")
 
     def on_server_stopped(self):
