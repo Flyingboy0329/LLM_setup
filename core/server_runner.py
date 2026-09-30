@@ -5,7 +5,6 @@ import subprocess
 from pathlib import Path
 from core.hardware import get_nvidia_gpus, calculate_hardware_plan
 
-# 本專案根目錄：C:\Users\pan\Desktop\LLM_setup
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MODELS_DIR = PROJECT_ROOT / "Models"
 

@@ -904,7 +904,8 @@ class MidnightDashboardWindow(QMainWindow):
         self.edit_ctx = QLineEdit("8192")
         self.edit_ctx.setFixedWidth(70)
         self.edit_ctx.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.edit_ctx.textChanged.connect(self.recalculate_vram_audit)
+        # 優化寫法（打字極速流暢，按 Enter 或點到外面時才瞬間試算）：
+        self.edit_ctx.editingFinished.connect(self.recalculate_vram_audit)
         cw_l.addWidget(self.edit_ctx)
 
         self.lbl_rec_ctx = QLabel("推薦大小: 8192")
