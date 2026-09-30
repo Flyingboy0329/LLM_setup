@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "llm-setup-tools": {
+      "command": "python",
+      "args": [
+        "C:\\Users\\pan\\Desktop\\LLM_setup\\tools\\mcp_server.py"
+      ],
+      "env": {
+        "MCP_ADMIN_KEY": "llm_secure_key_2026"
+      }
+    }
+  }
+}
